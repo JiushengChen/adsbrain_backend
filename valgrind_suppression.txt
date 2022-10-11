@@ -1,0 +1,13 @@
+{
+   ignore_unversioned_libs
+   Memcheck:Leak
+   obj:/usr/local/cuda*
+   obj:/datadrive/fhu/github/abo-models/team/selection/mistv3/m/mistv3/1/libonnxruntime*
+}
+{
+   ignore_versioned_libs
+   Memcheck:Leak
+   obj:/usr/local/cuda*
+   obj:/datadrive/fhu/github/abo-models/team/selection/mistv3/m/mistv3/1/libonnxruntime*
+}
+
