@@ -871,13 +871,16 @@ TRITONBACKEND_ModelInstanceExecute(
   try {
     output_str = instance_state->RunInference(input_str);
   } catch (const std::exception& ex) {
+    std::string err_msg = std::string("model ") + model_state->Name() +
+             ": failed to run inference: " + ex.what();
+    LOG_MESSAGE(
+        TRITONSERVER_LOG_ERROR,
+        err_msg.c_str());
     RESPOND_ALL_AND_SET_NULL_IF_ERROR(
         responses, request_count,
         TRITONSERVER_ErrorNew(
             TRITONSERVER_ERROR_INTERNAL,
-            (std::string("model ") + model_state->Name() +
-             ": failed to run inference: " + ex.what())
-                .c_str()));
+            err_msg.c_str()));
   }
 
   const char* output_buffer = output_str.c_str();
