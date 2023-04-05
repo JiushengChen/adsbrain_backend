@@ -24,6 +24,8 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#include "adsbrain_backend.h"
+
 #include <dlfcn.h>
 
 #include "triton/backend/backend_common.h"
@@ -32,8 +34,6 @@
 #include "triton/backend/backend_model_instance.h"
 #include "triton/backend/backend_output_responder.h"
 #include "triton/core/tritonbackend.h"
-
-#include "adsbrain_backend.h"
 
 namespace triton { namespace backend { namespace adsbrain {
 
@@ -430,9 +430,10 @@ class ModelInstanceState : public BackendModelInstance {
   // Get the state of the model that corresponds to this instance.
   ModelState* StateForModel() const { return model_state_; }
 
-  std::string RunInference(const std::string& input_data)
+  std::vector<std::string> RunInference(
+      const std::vector<std::string>& requests)
   {
-    return adsbrain_model_->RunInference(input_data);
+    return adsbrain_model_->RunInference(requests);
   }
 
   bool SetStringOutputBuffer(
@@ -452,6 +453,11 @@ class ModelInstanceState : public BackendModelInstance {
       std::vector<int64_t>* batchn_shape, TRITONBACKEND_Request** requests,
       const uint32_t request_count,
       std::vector<TRITONBACKEND_Response*>* responses, bool state);
+
+  TRITONSERVER_Error* SetResponses(
+      const std::vector<std::string>& response_data,
+      const std::vector<TRITONBACKEND_Response*>& responses,
+      const std::string& output_name, bool* cuda_copy);
 
  private:
   ModelInstanceState(
@@ -514,6 +520,67 @@ ModelInstanceState::SetStringStateBuffer(
   return SetStringBuffer(
       name, content, offsets, batchn_shape, requests, request_count, responses,
       true /* state */);
+}
+
+// TODO: we assume 1) the model only has one output; 2) the output is in the
+// shape of [1]
+TRITONSERVER_Error*
+ModelInstanceState::SetResponses(
+    const std::vector<std::string>& response_data,
+    const std::vector<TRITONBACKEND_Response*>& responses,
+    const std::string& output_name, bool* cuda_copy)
+{
+  *cuda_copy = false;
+  TRITONSERVER_Error* err;
+  std::vector<int64_t> shape = {1};
+  for (size_t i = 0; i < responses.size(); ++i) {
+    auto& response = responses[i];
+    const std::string& data_str = response_data[i];
+    TRITONBACKEND_Output* response_output;
+    err = TRITONBACKEND_ResponseOutput(
+        response, &response_output, output_name.c_str(),
+        TRITONSERVER_TYPE_BYTES, shape.data(), shape.size());
+    if (err != nullptr) {
+      return err;
+    }
+    TRITONSERVER_MemoryType actual_memory_type = TRITONSERVER_MEMORY_CPU_PINNED;
+    int64_t actual_memory_type_id = 0;
+    void* buffer;
+    err = TRITONBACKEND_OutputBuffer(
+        response_output, &buffer, data_str.size() + sizeof(uint32_t),
+        &actual_memory_type, &actual_memory_type_id);
+    if (err != nullptr) {
+      return err;
+    }
+    bool cuda_used = false;
+    size_t copied_byte_size = 0;
+    // Copy the data length
+    const uint32_t len = data_str.size();
+    err = CopyBuffer(
+        output_name, TRITONSERVER_MEMORY_CPU /* src_memory_type */,
+        0 /* src_memory_type_id */, actual_memory_type, actual_memory_type_id,
+        sizeof(uint32_t), static_cast<const void*>(&len),
+        static_cast<char*>(buffer) + copied_byte_size, stream_, &cuda_used);
+    if (err != nullptr) {
+      return err;
+    }
+    *cuda_copy |= cuda_used;
+    copied_byte_size += sizeof(uint32_t);
+    // Copy raw string content
+    err = CopyBuffer(
+        output_name, TRITONSERVER_MEMORY_CPU /* src_memory_type */,
+        0 /* src_memory_type_id */, actual_memory_type, actual_memory_type_id,
+        len, static_cast<const void*>(data_str.c_str()),
+        static_cast<char*>(buffer) + copied_byte_size, stream_, &cuda_used);
+    if (err != nullptr) {
+      return err;
+    }
+
+    *cuda_copy |= cuda_used;
+    copied_byte_size += len;
+  }
+
+  return nullptr;
 }
 
 bool
@@ -823,13 +890,16 @@ TRITONBACKEND_ModelInstanceExecute(
   TRITONSERVER_MemoryType input_buffer_memory_type;
   int64_t input_buffer_memory_type_id;
 
-  RESPOND_ALL_AND_SET_NULL_IF_ERROR(
-      responses, request_count,
-      collector.ProcessTensor(
-          model_state->InputTensorName().c_str(), nullptr /* existing_buffer */,
-          0 /* existing_buffer_byte_size */, allowed_input_types, &input_buffer,
-          &input_buffer_byte_size, &input_buffer_memory_type,
-          &input_buffer_memory_type_id));
+  TRITONSERVER_Error* err = collector.ProcessTensor(
+      model_state->InputTensorName().c_str(), nullptr /* existing_buffer */,
+      0 /* existing_buffer_byte_size */, allowed_input_types, &input_buffer,
+      &input_buffer_byte_size, &input_buffer_memory_type,
+      &input_buffer_memory_type_id);
+  if (err != nullptr) {
+    LOG_MESSAGE(TRITONSERVER_LOG_ERROR, TRITONSERVER_ErrorMessage(err));
+  }
+
+  RESPOND_ALL_AND_SET_NULL_IF_ERROR(responses, request_count, err);
 
   // Finalize the collector. If 'true' is returned, 'input_buffer'
   // will not be valid until the backend synchronizes the CUDA
@@ -840,14 +910,8 @@ TRITONBACKEND_ModelInstanceExecute(
   if (need_cuda_input_sync) {
     LOG_MESSAGE(
         TRITONSERVER_LOG_ERROR,
-        "'recommended' backend: unexpected CUDA sync required by collector");
+        "Adsbrain backend: unexpected CUDA sync required by collector");
   }
-
-  // 'input_buffer' contains the batched input tensor. The backend can
-  // implement whatever logic is necessary to produce the output
-  // tensor. This backend simply logs the input tensor value and then
-  // returns the input tensor value in the output tensor so no actual
-  // computation is needed.
 
   uint64_t compute_start_ns = 0;
   SET_TIMESTAMP(compute_start_ns);
@@ -858,74 +922,65 @@ TRITONBACKEND_ModelInstanceExecute(
        std::to_string(request_count))
           .c_str());
 
-  const std::string input_str(
-      input_buffer + sizeof(uint32_t),
-      input_buffer_byte_size - sizeof(uint32_t));
-
   LOG_MESSAGE(
       TRITONSERVER_LOG_VERBOSE,
-      (std::string(model_state->InputTensorName() + " value: ") + input_str)
+      (std::string(model_state->InputTensorName() + " value: ") +
+       std::string(input_buffer, input_buffer_byte_size))
           .c_str());
 
-  std::string output_str = "";
-  try {
-    output_str = instance_state->RunInference(input_str);
-  } catch (const std::exception& ex) {
-    std::string err_msg = std::string("model ") + model_state->Name() +
-             ": failed to run inference: " + ex.what();
-    LOG_MESSAGE(
-        TRITONSERVER_LOG_ERROR,
-        err_msg.c_str());
-    RESPOND_ALL_AND_SET_NULL_IF_ERROR(
-        responses, request_count,
-        TRITONSERVER_ErrorNew(
-            TRITONSERVER_ERROR_INTERNAL,
-            err_msg.c_str()));
-  }
+  bool cuda_copy = false;
+  // If everything works correctly, extract the batched requests and run
+  // inference.
+  if (err == nullptr) {
+    // 'input_buffer' contains the batched requests. Decode them to seperate
+    // requests.
+    std::vector<std::string> request_strs;
+    request_strs.reserve(request_count);
 
-  const char* output_buffer = output_str.c_str();
-  TRITONSERVER_MemoryType output_buffer_memory_type = input_buffer_memory_type;
-  int64_t output_buffer_memory_type_id = input_buffer_memory_type_id;
+    const char* cur_input_str_ptr = input_buffer;
+    for (uint32_t i = 0; i < request_count; ++i) {
+      uint32_t input_str_size = *((uint32_t*)cur_input_str_ptr);
+      cur_input_str_ptr += sizeof(uint32_t);
+      request_strs.push_back(std::string(cur_input_str_ptr, input_str_size));
+      cur_input_str_ptr += input_str_size;
+    }
+
+    std::vector<std::string> response_strs;
+
+    try {
+      response_strs = instance_state->RunInference(request_strs);
+    }
+    catch (const std::exception& ex) {
+      std::string err_msg = "Model " + model_state->Name() +
+                            ": failed to run inference: " + ex.what();
+      LOG_MESSAGE(TRITONSERVER_LOG_ERROR, err_msg.c_str());
+      err = TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_INTERNAL, err_msg.c_str());
+      // `err` will be released by the below macro
+      RESPOND_ALL_AND_SET_NULL_IF_ERROR(responses, request_count, err);
+    }
+
+    if (response_strs.size() != request_strs.size()) {
+      std::string err_msg =
+          "Molde inference expected " + std::to_string(request_strs.size()) +
+          " response strings, but got " + std::to_string(response_strs.size());
+      LOG_MESSAGE(TRITONSERVER_LOG_ERROR, err_msg.c_str());
+      err = TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_INTERNAL, err_msg.c_str());
+      // `err` will be released by the below macro
+      RESPOND_ALL_AND_SET_NULL_IF_ERROR(responses, request_count, err);
+    } else {
+      err = instance_state->SetResponses(
+          response_strs, responses, model_state->OutputTensorName(),
+          &cuda_copy);
+      if (err != nullptr) {
+        LOG_MESSAGE(TRITONSERVER_LOG_ERROR, TRITONSERVER_ErrorMessage(err));
+      }
+      RESPOND_ALL_AND_SET_NULL_IF_ERROR(responses, responses.size(), err);
+    }
+  }
 
   uint64_t compute_end_ns = 0;
   SET_TIMESTAMP(compute_end_ns);
 
-  bool supports_first_dim_batching;
-  RESPOND_ALL_AND_SET_NULL_IF_ERROR(
-      responses, request_count,
-      model_state->SupportsFirstDimBatching(&supports_first_dim_batching));
-
-  std::vector<int64_t> tensor_shape;
-  RESPOND_ALL_AND_SET_NULL_IF_ERROR(
-      responses, request_count, model_state->TensorShape(tensor_shape));
-
-  const size_t offsets[] = {0, output_str.length()};
-
-  auto dtype = model_state->TensorDataType();
-  bool cuda_copy = false;
-  if (dtype == TRITONSERVER_TYPE_BYTES) {
-    cuda_copy = instance_state->SetStringOutputBuffer(
-        model_state->OutputTensorName(), output_buffer, offsets, &tensor_shape,
-        requests, request_count, &responses);
-  } else {
-    // Because the output tensor values are concatenated into a single
-    // contiguous 'output_buffer', the backend must "scatter" them out
-    // to the individual response output tensors.  The backend utilities
-    // provide a "responder" to facilitate this scattering process.
-
-    // The 'responders's ProcessTensor function will copy the portion of
-    // 'output_buffer' corresonding to each request's output into the
-    // response for that request.
-    BackendOutputResponder responder(
-        requests, request_count, &responses, model_state->TritonMemoryManager(),
-        supports_first_dim_batching, false /* pinned_enabled */,
-        instance_state->CudaStream() /* stream*/);
-    responder.ProcessTensor(
-        model_state->OutputTensorName().c_str(), model_state->TensorDataType(),
-        tensor_shape, output_buffer, output_buffer_memory_type,
-        output_buffer_memory_type_id);
-    cuda_copy = responder.Finalize();
-  }
 
 #ifdef TRITON_ENABLE_GPU
   if (cuda_copy) {
@@ -971,6 +1026,10 @@ TRITONBACKEND_ModelInstanceExecute(
   // because if the model supports batching then any request can be a
   // batched request itself.
   size_t total_batch_size = 0;
+  bool supports_first_dim_batching;
+  RESPOND_ALL_AND_SET_NULL_IF_ERROR(
+      responses, request_count,
+      model_state->SupportsFirstDimBatching(&supports_first_dim_batching));
   if (!supports_first_dim_batching) {
     total_batch_size = request_count;
   } else {
