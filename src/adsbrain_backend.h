@@ -24,8 +24,10 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 // To use the adsbrain backend, you need to 1) derive AdsbrainInferenceModel to
 // implement the model-specific logic; 2) implement the C API
@@ -41,9 +43,9 @@ namespace triton { namespace backend { namespace adsbrain {
 // model using adsbrain backend. The derived class should implement the
 // following functions:
 // - Initialize: initialize the model instance with the given model config.
-// - RunInference: run the inference with the given input data. Currently it
-// only supports one input and one output with the string data type. This
-// function had better be thread-safe.
+// - RunInference: run the inference with the given requests. The number and
+// order of responses need to be as same as the number and order of requests.
+// This function needs to be thread-safe if multiple instances are launched.
 // - Destrunctor: destroy the model instance and release the resources.
 class AdsbrainInferenceModel {
  public:
@@ -55,10 +57,13 @@ class AdsbrainInferenceModel {
   virtual void Initialize(
       const std::unordered_map<std::string, std::string>& configs) = 0;
 
-  // Run inference on the model using the provided input data and return the
-  // output as a string. This function fully controls the output content
-  // format/shema. This function had better be thread-safe.
-  virtual std::string RunInference(const std::string& input_data) = 0;
+  // Run inference on the model for the provided requests and return the
+  // responses as strings. The number and order of responses must be as same as
+  // the number and order of requests. This function fully controls the output
+  // content format/shema. This function needs to be thread-safe if multiple
+  // instances are launched.
+  virtual std::vector<std::string> RunInference(
+      const std::vector<std::string>& requests) = 0;
 };
 
 }}}  // namespace triton::backend::adsbrain
