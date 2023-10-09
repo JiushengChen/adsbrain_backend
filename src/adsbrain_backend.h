@@ -28,6 +28,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <fstream>
 
 // To use the adsbrain backend, you need to 1) derive AdsbrainInferenceModel to
 // implement the model-specific logic; 2) implement the C API
@@ -64,6 +65,21 @@ class AdsbrainInferenceModel {
   // instances are launched.
   virtual std::vector<std::string> RunInference(
       const std::vector<std::string>& requests) = 0;
+
+
+  // For offline inference. All the inputs are 
+  // read from given `in_file` and outputs are saved in `out_file`, these files
+  // are predefined, do not modify their location. `batch_size` is defined via
+  // AB_OFFLINE_BATCH_SIZE, valid value is > 0 integer.
+  virtual void ProcessAFile(
+      const std::string& in_file,
+      const std::string& out_file,
+      int batch_size)
+{
+    std::ofstream f(out_file);
+    f.close();
+}
+        
 };
 
 }}}  // namespace triton::backend::adsbrain

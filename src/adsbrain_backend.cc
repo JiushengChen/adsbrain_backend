@@ -27,6 +27,8 @@
 #include "adsbrain_backend.h"
 
 #include <dlfcn.h>
+#include <fstream>
+#include <sstream>
 
 #include "triton/backend/backend_common.h"
 #include "triton/backend/backend_input_collector.h"
@@ -45,6 +47,17 @@ namespace triton { namespace backend { namespace adsbrain {
 //
 
 /////////////
+
+#if 0
+void AdsbrainInferenceModel::ProcessAFile(
+    const std::string& in_file,
+    const std::string& out_file,
+    int batch_size)
+{
+    std::ofstream f(out_file);
+    f.close();
+}
+#endif
 
 extern "C" {
 
@@ -487,7 +500,9 @@ class ModelInstanceState : public BackendModelInstance {
     adsbrain_model_->Initialize(adsbrain_model_configurations);
 
     // Run offline workload
-    offline_bsz_ = 0;
+    int offline_bsz_ = 0;
+    std::string input_file_adl_path_;
+    std::string output_file_adl_path_;
     char* v;
     v = getenv("AB_OFFLINE_BATCH_SIZE");
     if(v != NULL) {
@@ -530,18 +545,23 @@ class ModelInstanceState : public BackendModelInstance {
         v = getenv("AB_OFFLINE_OUTPUT_FILE_LOCAL_PATH");
         if (v != NULL) local_file_out = v;
 
-        LOG_INFO << "AB_OFFLINE_BATCH_SIZE=" << offline_bsz_;
         if (offline_bsz_ > 0) {
-           LOG_INFO << "Go with offline mode";
+           std::stringstream ss;
+           ss << "AB_OFFLINE_BATCH_SIZE=" << offline_bsz_ << ", go with offline mode";
+           LOG_MESSAGE(TRITONSERVER_LOG_INFO, ss.str().c_str());
            int ret = system("ablog");
            if (ret != 0) {
               throw std::runtime_error("Run ablog error!");
            }
 
            // Download input file
-           std::stringstream ss;
-           LOG_INFO << "Start downloading input file " << input_file_adl_path_;
+           ss.str("");
+           ss.clear();
+           ss << "Start downloading input file " << input_file_adl_path_;
+           LOG_MESSAGE(TRITONSERVER_LOG_INFO, ss.str().c_str());
            system("mkdir -p /.abo/offline/tmp/");
+           ss.str("");
+           ss.clear();
            ss << "rm -f " << local_file_in << " " << local_file_out;
            system(ss.str().c_str());
 
@@ -566,11 +586,25 @@ class ModelInstanceState : public BackendModelInstance {
            if (filesize == -1) {
               throw std::runtime_error("Error getting size of local file " + local_file_in);
            }
-           LOG_INFO << "Input file " << input_file_adl_path_ << " has " << filesize  << " bytes.";
+           ss.str("");
+           ss.clear();
+           ss << "Input file " << input_file_adl_path_ << " has " << filesize  << " bytes.";
+           LOG_MESSAGE(TRITONSERVER_LOG_INFO, ss.str().c_str());
 
            // Call c++ code to process file
-           LOG_INFO << "Start processing file " << input_file_adl_path_;
-           adsbrain_model_->ProcessAFile(local_file_in, local_file_out, offline_bsz_);
+           ss.str("");
+           ss.clear();
+           ss << "Start processing file " << input_file_adl_path_;
+           LOG_MESSAGE(TRITONSERVER_LOG_INFO, ss.str().c_str());
+           try {
+               adsbrain_model_->ProcessAFile(local_file_in, local_file_out, offline_bsz_);
+           }
+           catch (const std::exception& ex) {
+             std::string err_msg = "Model " + model_state->Name() +
+                                   ": failed to run offline inference: " + ex.what();
+             LOG_MESSAGE(TRITONSERVER_LOG_ERROR, err_msg.c_str());
+             throw ex;
+          }
 
            // check output file size
            std::ifstream f2(local_file_out, std::ios::binary | std::ios::ate); // Open at the end
@@ -583,8 +617,11 @@ class ModelInstanceState : public BackendModelInstance {
            }
 
            // Upload output file
-           LOG_INFO << "Start uploading " << filesize
-                    << " bytes to output file " << output_file_adl_path_;
+           ss.str("");
+           ss.clear();
+           ss << "Start uploading " << filesize << " bytes to output file " << output_file_adl_path_;
+           LOG_MESSAGE(TRITONSERVER_LOG_INFO, ss.str().c_str());
+
            ss.str("");
            ss.clear();
            ss << "cpps -AdlPath " << "\"" << output_file_adl_path_
@@ -597,7 +634,7 @@ class ModelInstanceState : public BackendModelInstance {
               throw std::runtime_error(ss.str());
            }
 
-           LOG_INFO << "Offline workload successfully finished.";
+           LOG_MESSAGE(TRITONSERVER_LOG_INFO, "Offline workload successfully finished.");
         } // if (offline_bsz_ > 0)
       } // if (v != NULL)
     }
