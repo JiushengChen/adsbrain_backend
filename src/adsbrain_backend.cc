@@ -559,11 +559,11 @@ class ModelInstanceState : public BackendModelInstance {
            ss.clear();
            ss << "Start downloading input file " << input_file_adl_path_;
            LOG_MESSAGE(TRITONSERVER_LOG_INFO, ss.str().c_str());
-           system("mkdir -p /.abo/offline/tmp/");
+           int ret = system("mkdir -p /.abo/offline/tmp/");
            ss.str("");
            ss.clear();
            ss << "rm -f " << local_file_in << " " << local_file_out;
-           system(ss.str().c_str());
+           ret = system(ss.str().c_str());
 
            ss.str("");
            ss.clear();
