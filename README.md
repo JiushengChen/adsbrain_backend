@@ -9,6 +9,11 @@ in config.pbtxt will not be used; 4) the input and output data will be in the
 format of `raw_format`, which means no metadata info required for input or output.
 
 ## How to build
+1. Create an ABO docker container
+
+2. Run `./install_deps.sh` to install the dependent libraries and tools
+
+3. Run `./build.sh` to build the project
 ```
 cmake \
   -DCMAKE_INSTALL_PREFIX:PATH=`pwd`/install \
