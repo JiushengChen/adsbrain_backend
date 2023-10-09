@@ -485,7 +485,122 @@ class ModelInstanceState : public BackendModelInstance {
 
     adsbrain_model_ = (*create_model_func_)();
     adsbrain_model_->Initialize(adsbrain_model_configurations);
-  }
+
+    // Run offline workload
+    offline_bsz_ = 0;
+    char* v;
+    v = getenv("AB_OFFLINE_BATCH_SIZE");
+    if(v != NULL) {
+        try {
+            offline_bsz_ = std::stoi(v);
+        }
+        catch(std::invalid_argument& e) {
+            throw std::invalid_argument("Bad value of AB_OFFLINE_BATCH_SIZE: \""
+                    + std::string(v) + "\"");
+        }
+        v = getenv("AB_OFFLINE_INPUT_FILE_ADL_PATH");
+        if(v == NULL) {
+            throw std::invalid_argument("AB_OFFLINE_INPUT_FILE_ADL_PATH not defined!");
+        }
+        input_file_adl_path_  = v;
+        if (input_file_adl_path_.empty() || input_file_adl_path_.rfind("adl://", 0) != 0) {
+            std::stringstream ss;
+            ss << "AB_OFFLINE_INPUT_FILE_ADL_PATH value 'i" << input_file_adl_path_
+               << "' is invalid! Valid value starts with 'adl://'.";
+           throw std::invalid_argument(ss.str());
+        }
+
+        v = getenv("AB_OFFLINE_OUTPUT_FILE_ADL_PATH");
+        if(v == NULL) {
+            throw std::invalid_argument("AB_OFFLINE_OUTPUT_FILE_ADL_PATH not defined!");
+        }
+        output_file_adl_path_  = v;
+        if (output_file_adl_path_.empty() || output_file_adl_path_.rfind("adl://", 0) != 0) {
+            std::stringstream ss;
+            ss << "AB_OFFLINE_OUTPUT_FILE_ADL_PATH value 'i" << output_file_adl_path_
+               << "' is invalid! Valid value starts with 'adl://'.";
+           throw std::invalid_argument(ss.str());
+        }
+
+        std::string local_file_in = "/.abo/offline/tmp/in";
+        v = getenv("AB_OFFLINE_INPUT_FILE_LOCAL_PATH");
+        if (v != NULL) local_file_in = v;
+
+        std::string local_file_out  = "/.abo/offline/tmp/out";
+        v = getenv("AB_OFFLINE_OUTPUT_FILE_LOCAL_PATH");
+        if (v != NULL) local_file_out = v;
+
+        LOG_INFO << "AB_OFFLINE_BATCH_SIZE=" << offline_bsz_;
+        if (offline_bsz_ > 0) {
+           LOG_INFO << "Go with offline mode";
+           int ret = system("ablog");
+           if (ret != 0) {
+              throw std::runtime_error("Run ablog error!");
+           }
+
+           // Download input file
+           std::stringstream ss;
+           LOG_INFO << "Start downloading input file " << input_file_adl_path_;
+           system("mkdir -p /.abo/offline/tmp/");
+           ss << "rm -f " << local_file_in << " " << local_file_out;
+           system(ss.str().c_str());
+
+           ss.str("");
+           ss.clear();
+           ss << "cpps -AdlPath " << "\"" << input_file_adl_path_
+              << "\"" << " -LocalPath /.abo/offline/tmp/in -Binary";
+           ret = system(ss.str().c_str());
+           if (ret != 0) {
+              ss.str("");
+              ss.clear();
+              ss << "Failed to download file \"" << input_file_adl_path_ << "\"!";
+              throw std::runtime_error(ss.str());
+           }
+
+           // check input file size
+           std::ifstream f(local_file_in, std::ios::binary | std::ios::ate); // Open at the end
+           if (!f.is_open()) {
+              throw std::runtime_error("Error opening local file " + local_file_in);
+           }
+           std::streampos filesize = f.tellg();
+           if (filesize == -1) {
+              throw std::runtime_error("Error getting size of local file " + local_file_in);
+           }
+           LOG_INFO << "Input file " << input_file_adl_path_ << " has " << filesize  << " bytes.";
+
+           // Call c++ code to process file
+           LOG_INFO << "Start processing file " << input_file_adl_path_;
+           adsbrain_model_->ProcessAFile(local_file_in, local_file_out, offline_bsz_);
+
+           // check output file size
+           std::ifstream f2(local_file_out, std::ios::binary | std::ios::ate); // Open at the end
+           if (!f2.is_open()) {
+              throw std::runtime_error("Error opening local file " + local_file_out);
+           }
+           filesize = f2.tellg();
+           if (filesize == -1) {
+              throw std::runtime_error("Error getting size of file " + local_file_out);
+           }
+
+           // Upload output file
+           LOG_INFO << "Start uploading " << filesize
+                    << " bytes to output file " << output_file_adl_path_;
+           ss.str("");
+           ss.clear();
+           ss << "cpps -AdlPath " << "\"" << output_file_adl_path_
+              << "\"" << " -LocalPath /.abo/offline/tmp/out -Upload -Binary";
+           ret = system(ss.str().c_str());
+           if (ret != 0) {
+              ss.str("");
+              ss.clear();
+              ss << "Failed to upload to file \"" << output_file_adl_path_ << "\"!";
+              throw std::runtime_error(ss.str());
+           }
+
+           LOG_INFO << "Offline workload successfully finished.";
+        } // if (offline_bsz_ > 0)
+      } // if (v != NULL)
+    }
 
   ModelState* model_state_;
   std::unique_ptr<AdsbrainInferenceModel> adsbrain_model_;
