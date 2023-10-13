@@ -66,7 +66,6 @@ class AdsbrainInferenceModel {
   virtual std::vector<std::string> RunInference(
       const std::vector<std::string>& requests) = 0;
 
-
   // For offline inference. All the inputs are 
   // read from given `in_file` and outputs are saved in `out_file`, these files
   // are predefined, do not modify their location. `batch_size` is defined via

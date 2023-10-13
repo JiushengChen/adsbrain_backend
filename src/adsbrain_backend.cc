@@ -27,7 +27,6 @@
 #include "adsbrain_backend.h"
 
 #include <dlfcn.h>
-#include <fstream>
 #include <sstream>
 
 #include "triton/backend/backend_common.h"
@@ -47,17 +46,6 @@ namespace triton { namespace backend { namespace adsbrain {
 //
 
 /////////////
-
-#if 0
-void AdsbrainInferenceModel::ProcessAFile(
-    const std::string& in_file,
-    const std::string& out_file,
-    int batch_size)
-{
-    std::ofstream f(out_file);
-    f.close();
-}
-#endif
 
 extern "C" {
 
